@@ -37,7 +37,11 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
 GAMBLING_ROLE_ID = 1545072135297572885
-ADMIN_IDS = {1545039825080684554, 1544778851748417577}
+ADMIN_IDS = {
+    1215611779774947331,
+    1544778851748417577,
+    1545039825080684554,
+}
 
 DATA_FILE = Path(__file__).parent / "economy.json"
 CURRENCY_NAME = "gems"
@@ -117,15 +121,26 @@ def gambling_check():
 
 
 def admin_check():
-    """Requires the user's ID to be in ADMIN_IDS. Used for addgems/removegems only."""
+    """Requires the gambling role and an approved admin ID."""
 
     async def predicate(interaction: discord.Interaction) -> bool:
-        is_admin = interaction.user.id in ADMIN_IDS
-        if not is_admin:
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return False
+
+        has_role = any(role.id == GAMBLING_ROLE_ID for role in member.roles)
+        is_admin = member.id in ADMIN_IDS
+
+        if not has_role or not is_admin:
             await interaction.response.send_message(
                 "You don't have permission to use this command.", ephemeral=True
             )
-        return is_admin
+            return False
+
+        return True
 
     return app_commands.check(predicate)
 
