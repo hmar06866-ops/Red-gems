@@ -235,6 +235,25 @@ def fmt(amount: int) -> str:
     return f"{amount:,} {CURRENCY_NAME}"
 
 
+# House tax: taken out of winnings only (never out of losses/pushes/the
+# original bet), applied the same way across coinflip, blackjack, crash, and
+# mines so the house edge is consistent regardless of which game is played.
+TAX_RATE = 0.05
+
+
+def apply_tax(profit: int) -> tuple[int, int]:
+    """
+    Given a gross profit amount from a win, return (net_profit, tax_amount).
+    Only positive profit is taxed — a loss (negative) or a push (zero) passes
+    through unchanged so the tax never bites into money the player didn't
+    actually win.
+    """
+    if profit <= 0:
+        return profit, 0
+    tax = round(profit * TAX_RATE)
+    return profit - tax, tax
+
+
 def parse_amount(value: str) -> int:
     """Parse amounts like 1000000, 1m, 1.5m, 250k, etc."""
     value = value.strip().lower().replace(",", "")
@@ -368,10 +387,15 @@ async def coinflip(interaction: discord.Interaction, amount: str, choice: app_co
     won = result == choice.value
 
     if won:
-        new_balance = await add_balance(interaction.user.id, amount)
+        net_win, tax = apply_tax(amount)
+        new_balance = await add_balance(interaction.user.id, net_win)
         embed = discord.Embed(
             title="🪙 Coinflip — You Won!",
-            description=f"The coin landed on **{result}**.\nYou won **{fmt(amount)}**!\nNew balance: {fmt(new_balance)}",
+            description=(
+                f"The coin landed on **{result}**.\n"
+                f"You won **{fmt(net_win)}** (after {int(TAX_RATE * 100)}% tax of {fmt(tax)}).\n"
+                f"New balance: {fmt(new_balance)}"
+            ),
             color=discord.Color.green(),
         )
     else:
@@ -464,11 +488,15 @@ class BlackjackView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
-        new_balance = await add_balance(self.player_id, payout)
+        net_payout, tax = apply_tax(payout)
+        new_balance = await add_balance(self.player_id, net_payout)
         embed = self.build_embed(reveal_dealer=True)
         color_map = {"win": discord.Color.green(), "lose": discord.Color.red(), "push": discord.Color.greyple()}
         embed.color = color_map.get(result, discord.Color.blurple())
-        embed.add_field(name="Result", value=f"{result.upper()} — new balance: {fmt(new_balance)}", inline=False)
+        result_text = f"{result.upper()} — new balance: {fmt(new_balance)}"
+        if tax:
+            result_text += f" (won {fmt(net_payout)} after {int(TAX_RATE * 100)}% tax of {fmt(tax)})"
+        embed.add_field(name="Result", value=result_text, inline=False)
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
@@ -522,11 +550,19 @@ async def blackjack(interaction: discord.Interaction, amount: str):
     view = BlackjackView(interaction.user.id, deck, player_hand, dealer_hand, amount)
 
     if hand_value(player_hand) == 21:
-        payout = int(amount * 1.5)
-        new_balance = await add_balance(interaction.user.id, payout)
+        gross_payout = int(amount * 1.5)
+        net_payout, tax = apply_tax(gross_payout)
+        new_balance = await add_balance(interaction.user.id, net_payout)
         embed = view.build_embed(reveal_dealer=True)
         embed.color = discord.Color.gold()
-        embed.add_field(name="Result", value=f"BLACKJACK! You won {fmt(payout)} — new balance: {fmt(new_balance)}", inline=False)
+        embed.add_field(
+            name="Result",
+            value=(
+                f"BLACKJACK! You won {fmt(net_payout)} (after {int(TAX_RATE * 100)}% tax of {fmt(tax)}) "
+                f"— new balance: {fmt(new_balance)}"
+            ),
+            inline=False,
+        )
         await interaction.response.send_message(embed=embed)
         return
 
@@ -564,6 +600,8 @@ class CrashView(discord.ui.View):
         self.cashed_out = False
         self.crashed = False
         self.multiplier = 1.0
+        self.net_profit = 0
+        self.tax = 0
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.player_id:
@@ -576,8 +614,10 @@ class CrashView(discord.ui.View):
             desc = f"💥 Crashed at **{self.crash_point:.2f}x**\nYou lost **{fmt(self.bet)}**"
             color = discord.Color.red()
         elif self.cashed_out:
-            payout = int(self.bet * self.multiplier) - self.bet
-            desc = f"✅ Cashed out at **{self.multiplier:.2f}x**\nYou won **{fmt(payout)}**"
+            desc = (
+                f"✅ Cashed out at **{self.multiplier:.2f}x**\n"
+                f"You won **{fmt(self.net_profit)}** (after {int(TAX_RATE * 100)}% tax of {fmt(self.tax)})"
+            )
             color = discord.Color.green()
         else:
             desc = f"📈 Current multiplier: **{self.multiplier:.2f}x**\nBet: {fmt(self.bet)}"
@@ -594,8 +634,9 @@ class CrashView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
-        payout = int(self.bet * self.multiplier) - self.bet
-        await add_balance(self.player_id, payout)
+        gross_profit = int(self.bet * self.multiplier) - self.bet
+        self.net_profit, self.tax = apply_tax(gross_profit)
+        await add_balance(self.player_id, self.net_profit)
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
         self.stop()
 
@@ -813,9 +854,14 @@ class MinesView(discord.ui.View):
                 child.disabled = True
 
         if won:
-            payout = int(self.bet * self.current_multiplier()) - self.bet
-            new_balance = await add_balance(self.player_id, payout)
-            result = f"✅ Cashed out at **{self.current_multiplier():.2f}x**! Won **{fmt(payout)}**. New balance: {fmt(new_balance)}"
+            gross_profit = int(self.bet * self.current_multiplier()) - self.bet
+            net_profit, tax = apply_tax(gross_profit)
+            new_balance = await add_balance(self.player_id, net_profit)
+            result = (
+                f"✅ Cashed out at **{self.current_multiplier():.2f}x**! "
+                f"Won **{fmt(net_profit)}** (after {int(TAX_RATE * 100)}% tax of {fmt(tax)}). "
+                f"New balance: {fmt(new_balance)}"
+            )
         else:
             new_balance = await get_balance(self.player_id)
             result = f"💥 You hit a mine! Lost **{fmt(self.bet)}**. New balance: {fmt(new_balance)}"
