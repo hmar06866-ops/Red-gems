@@ -527,11 +527,28 @@ async def blackjack(interaction: discord.Interaction, amount: str):
 # ----------------------------------------------------------------------------
 # CRASH
 # ----------------------------------------------------------------------------
+#
+# Tuning. Growth is multiplicative (a steady % per tick) instead of a flat
+# random add-on, so the climb feels smooth at every level instead of jumping
+# ~25% in one tick right out of the gate. CRASH_MAX_TICKS is a hard safety
+# net: even in the unluckiest case the game is guaranteed to end on its own.
+
+CRASH_TICK_SECONDS = 1.0
+CRASH_GROWTH_MIN = 0.04       # +4% per tick, minimum
+CRASH_GROWTH_MAX = 0.08       # +8% per tick, maximum
+CRASH_MAX_MULTIPLIER = 20.0   # lowered from 50x so worst-case games stay short
+CRASH_MAX_TICKS = 90          # hard cap (~90s) — the game always ends by here
 
 
 class CrashView(discord.ui.View):
     def __init__(self, player_id: int, bet: int, crash_point: float):
-        super().__init__(timeout=60)
+        # No passive timeout: this game's lifecycle is fully owned by the
+        # background loop in crash(), which always calls self.stop() when it
+        # ends (crash, cash-out, or the hard tick cap). A passive timeout
+        # here previously caused discord.py to stop listening for the Cash
+        # Out click after 60s while the loop kept running underneath it —
+        # the multiplier would keep climbing with no way to stop it.
+        super().__init__(timeout=None)
         self.player_id = player_id
         self.bet = bet
         self.crash_point = crash_point
@@ -574,6 +591,13 @@ class CrashView(discord.ui.View):
         self.stop()
 
 
+def _generate_crash_point() -> float:
+    """House-edge-weighted crash point, floored and capped to sane bounds."""
+    crash_point = (0.99 / (1 - random.random())) ** 0.5
+    crash_point = max(1.01, min(crash_point, CRASH_MAX_MULTIPLIER))
+    return round(crash_point, 2)
+
+
 @bot.tree.command(name="crash", description="Watch the multiplier rise and cash out before it crashes.")
 @app_commands.describe(amount="How many gems to bet")
 @gambling_check()
@@ -594,31 +618,53 @@ async def crash(interaction: discord.Interaction, amount: str):
     # as profit only, so nothing further is deducted here on a loss).
     await add_balance(interaction.user.id, -amount)
 
-    # Generate a crash point with a house edge, weighted toward lower multipliers.
-    crash_point = round(max(1.0, (0.99 / (1 - random.random())) ** 0.5), 2)
-    crash_point = min(crash_point, 50.0)  # cap for sanity
+    crash_point = _generate_crash_point()
 
     view = CrashView(interaction.user.id, amount, crash_point)
     await interaction.response.send_message(embed=view.build_embed(), view=view)
     message = await interaction.original_response()
 
-    while not view.cashed_out and view.multiplier < view.crash_point:
-        await asyncio.sleep(1.5)
+    for _ in range(CRASH_MAX_TICKS):
         if view.cashed_out:
-            break
-        view.multiplier = round(view.multiplier + random.uniform(0.08, 0.25), 2)
+            return
+
+        await asyncio.sleep(CRASH_TICK_SECONDS)
+        if view.cashed_out:
+            return
+
+        growth_rate = random.uniform(CRASH_GROWTH_MIN, CRASH_GROWTH_MAX)
+        view.multiplier = round(view.multiplier * (1 + growth_rate), 2)
+
         if view.multiplier >= view.crash_point:
             view.multiplier = view.crash_point
             view.crashed = True
             for child in view.children:
                 child.disabled = True
-            await message.edit(embed=view.build_embed(), view=view)
+            try:
+                await message.edit(embed=view.build_embed(), view=view)
+            except discord.HTTPException:
+                pass
             view.stop()
-            break
+            return
+
         try:
             await message.edit(embed=view.build_embed(), view=view)
         except discord.HTTPException:
-            break
+            view.stop()
+            return
+
+    # Hard safety net: should be mathematically unreachable given
+    # CRASH_GROWTH_MIN and CRASH_MAX_MULTIPLIER, but guarantees the game
+    # can never run forever if the tuning above ever changes.
+    if not view.cashed_out and not view.crashed:
+        view.crashed = True
+        for child in view.children:
+            child.disabled = True
+        try:
+            await message.edit(embed=view.build_embed(), view=view)
+        except discord.HTTPException:
+            pass
+        view.stop()
 
 
 # ----------------------------------------------------------------------------
