@@ -44,7 +44,10 @@ CURRENCY_NAME = "gems"
 STARTING_BALANCE = 100
 
 # Every user's balance is stored separately in economy.json using their
-# Discord user ID as the key.
+# Discord user ID as the key. A .bak copy is kept alongside it so a
+# corrupted or empty read never gets silently saved over real data.
+BACKUP_FILE = DATA_FILE.with_suffix(".bak")
+
 if not DATA_FILE.exists():
     DATA_FILE.write_text("{}", encoding="utf-8")
 
@@ -57,25 +60,60 @@ MINES_GRID_SIZE = 5  # 5 columns; 24 playable tiles + 1 Cash Out button
 _data_lock = asyncio.Lock()
 
 
-def _load_data() -> dict:
-    if not DATA_FILE.exists():
-        return {}
+def _read_json(path: Path) -> dict | None:
+    """Return the dict in `path`, or None if it's missing/unreadable/empty."""
+    if not path.exists():
+        return None
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return None
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _load_data() -> dict:
+    """
+    Load economy.json. If it's missing, empty, or corrupted, fall back to the
+    last known-good backup instead of silently returning {} — an empty dict
+    here would otherwise get written straight back out on the next save and
+    permanently wipe everyone's balance.
+    """
+    data = _read_json(DATA_FILE)
+    if data is not None:
+        return data
+
+    backup = _read_json(BACKUP_FILE)
+    if backup is not None:
+        print(f"[economy] {DATA_FILE.name} was missing/corrupted — restored from backup.")
+        _save_data(backup)
+        return backup
+
+    print(f"[economy] WARNING: {DATA_FILE.name} and its backup are both missing/corrupted. "
+          f"Starting from an empty ledger — check for a bad deploy or ephemeral filesystem.")
+    return {}
 
 
 def _save_data(data: dict) -> None:
-    """Save each user's data safely, keyed by their Discord user ID."""
+    """Save each user's data safely, keyed by their Discord user ID, and refresh the backup."""
     temp_file = DATA_FILE.with_suffix(".tmp")
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
     os.replace(temp_file, DATA_FILE)
+
+    # Refresh the backup only with data we know is non-empty, so the backup
+    # itself never becomes a copy of a wiped ledger.
+    if data:
+        backup_temp = BACKUP_FILE.with_suffix(".tmp")
+        with open(backup_temp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(backup_temp, BACKUP_FILE)
 
 
 async def get_balance(user_id: int) -> int:
