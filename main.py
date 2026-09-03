@@ -36,12 +36,8 @@ from dotenv import load_dotenv
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-GAMBLING_ROLE_ID = 1545072135297572885
-ADMIN_IDS = {
-    1215611779774947331,
-    1544778851748417577,
-    1545039825080684554,
-}
+COMMAND_ROLE_ID = 1545072135297572885
+FULL_ACCESS_ROLE_IDS = {1544778851748417577, 1545039825080684554}
 
 DATA_FILE = Path(__file__).parent / "economy.json"
 CURRENCY_NAME = "gems"
@@ -100,7 +96,7 @@ async def add_balance(user_id: int, amount: int) -> int:
 
 
 def gambling_check():
-    """Requires the gambling role to use economy/game commands."""
+    """Requires the command role or a full-access role for normal commands."""
 
     async def predicate(interaction: discord.Interaction) -> bool:
         member = interaction.user
@@ -110,18 +106,22 @@ def gambling_check():
             )
             return False
 
-        has_role = any(role.id == GAMBLING_ROLE_ID for role in member.roles)
-        if not has_role:
+        has_command_role = any(role.id == COMMAND_ROLE_ID for role in member.roles)
+        has_full_access_role = any(role.id in FULL_ACCESS_ROLE_IDS for role in member.roles)
+
+        if not (has_command_role or has_full_access_role):
             await interaction.response.send_message(
                 "You don't have permission to use this command.", ephemeral=True
             )
-        return has_role
+            return False
+
+        return True
 
     return app_commands.check(predicate)
 
 
 def admin_check():
-    """Requires the gambling role and an approved admin ID."""
+    """Only full-access roles can use /addgems and /removegems."""
 
     async def predicate(interaction: discord.Interaction) -> bool:
         member = interaction.user
@@ -131,10 +131,9 @@ def admin_check():
             )
             return False
 
-        has_role = any(role.id == GAMBLING_ROLE_ID for role in member.roles)
-        is_admin = member.id in ADMIN_IDS
+        has_full_access_role = any(role.id in FULL_ACCESS_ROLE_IDS for role in member.roles)
 
-        if not has_role or not is_admin:
+        if not has_full_access_role:
             await interaction.response.send_message(
                 "You don't have permission to use this command.", ephemeral=True
             )
