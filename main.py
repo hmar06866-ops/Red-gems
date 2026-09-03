@@ -163,6 +163,21 @@ def fmt(amount: int) -> str:
     return f"{amount:,} {CURRENCY_NAME}"
 
 
+def parse_amount(value: str) -> int:
+    """Parse amounts like 1000000, 1m, 1.5m, 250k, etc."""
+    value = value.strip().lower().replace(",", "")
+    multipliers = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
+    if value and value[-1] in multipliers:
+        try:
+            return int(float(value[:-1]) * multipliers[value[-1]])
+        except ValueError:
+            return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
 # ----------------------------------------------------------------------------
 # ECONOMY COMMANDS
 # ----------------------------------------------------------------------------
@@ -186,7 +201,8 @@ async def balance(interaction: discord.Interaction, user: discord.User | None = 
 @bot.tree.command(name="tip", description="Send gems to another user.")
 @app_commands.describe(user="The user to tip", amount="How many gems to send")
 @gambling_check()
-async def tip(interaction: discord.Interaction, user: discord.User, amount: int):
+async def tip(interaction: discord.Interaction, user: discord.User, amount: str):
+    amount = parse_amount(amount)
     if amount <= 0:
         await interaction.response.send_message("Amount must be positive.", ephemeral=True)
         return
@@ -218,7 +234,8 @@ async def tip(interaction: discord.Interaction, user: discord.User, amount: int)
 @bot.tree.command(name="addgems", description="[Admin only] Add gems to a user's balance.")
 @app_commands.describe(user="The user to give gems to", amount="How many gems to add")
 @admin_check()
-async def addgems(interaction: discord.Interaction, user: discord.User, amount: int):
+async def addgems(interaction: discord.Interaction, user: discord.User, amount: str):
+    amount = parse_amount(amount)
     if amount <= 0:
         await interaction.response.send_message("Amount must be positive.", ephemeral=True)
         return
@@ -234,7 +251,8 @@ async def addgems(interaction: discord.Interaction, user: discord.User, amount: 
 @bot.tree.command(name="removegems", description="[Admin only] Remove gems from a user's balance.")
 @app_commands.describe(user="The user to remove gems from", amount="How many gems to remove")
 @admin_check()
-async def removegems(interaction: discord.Interaction, user: discord.User, amount: int):
+async def removegems(interaction: discord.Interaction, user: discord.User, amount: str):
+    amount = parse_amount(amount)
     if amount <= 0:
         await interaction.response.send_message("Amount must be positive.", ephemeral=True)
         return
@@ -261,7 +279,8 @@ async def removegems(interaction: discord.Interaction, user: discord.User, amoun
     ]
 )
 @gambling_check()
-async def coinflip(interaction: discord.Interaction, amount: int, choice: app_commands.Choice[str]):
+async def coinflip(interaction: discord.Interaction, amount: str, choice: app_commands.Choice[str]):
+    amount = parse_amount(amount)
     if amount <= 0:
         await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
@@ -411,7 +430,8 @@ class BlackjackView(discord.ui.View):
 @bot.tree.command(name="blackjack", description="Play a round of blackjack.")
 @app_commands.describe(amount="How many gems to bet")
 @gambling_check()
-async def blackjack(interaction: discord.Interaction, amount: int):
+async def blackjack(interaction: discord.Interaction, amount: str):
+    amount = parse_amount(amount)
     if amount <= 0:
         await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
@@ -494,7 +514,8 @@ class CrashView(discord.ui.View):
 @bot.tree.command(name="crash", description="Watch the multiplier rise and cash out before it crashes.")
 @app_commands.describe(amount="How many gems to bet")
 @gambling_check()
-async def crash(interaction: discord.Interaction, amount: int):
+async def crash(interaction: discord.Interaction, amount: str):
+    amount = parse_amount(amount)
     if amount <= 0:
         await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
@@ -656,7 +677,8 @@ class MinesView(discord.ui.View):
 @bot.tree.command(name="mines", description="Play mines — reveal tiles and cash out before you hit a mine.")
 @app_commands.describe(amount="How many gems to bet", mines="Number of mines on the board (1-24, default 5)")
 @gambling_check()
-async def mines(interaction: discord.Interaction, amount: int, mines: int = 5):
+async def mines(interaction: discord.Interaction, amount: str, mines: int = 5):
+    amount = parse_amount(amount)
     if amount <= 0:
         await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
