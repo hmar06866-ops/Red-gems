@@ -2,7 +2,7 @@
 Discord Gambling/Economy Bot
 =============================
 Games: Blackjack, Coinflip, Crash, Mines
-Economy: /balance, /tip, /addgems, /removegems
+Economy: /balance, /tip, /addgems, /removegems, /addpromo, /redeem
 
 Permissions:
 - All gambling + economy commands (balance, tip, blackjack, coinflip, crash, mines)
@@ -38,6 +38,9 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
 COMMAND_ROLE_ID = 1545072135297572885
 FULL_ACCESS_ROLE_IDS = {1544778851748417577, 1545039825080684554}
+# Set VERIFIED_ROLE_ID in your .env to the role required to use /redeem.
+# Users without this role cannot redeem promo codes.
+VERIFIED_ROLE_ID = int(os.getenv("VERIFIED_ROLE_ID", "0"))
 
 # DATA_DIR should point at a mounted persistent Volume in production (e.g. on
 # Railway: Settings -> Volumes -> mount path, then set DATA_DIR to that same
@@ -267,6 +270,163 @@ def parse_amount(value: str) -> int:
         return int(value)
     except ValueError:
         return 0
+
+
+# ----------------------------------------------------------------------------
+# PROMO CODES
+# ----------------------------------------------------------------------------
+
+async def add_promo_code(code: str, amount: int, max_uses: int | None = None) -> bool:
+    """Create/update a promo code. Returns False if the code already exists."""
+    async with _data_lock:
+        data = _load_data()
+        promos = data.get("_promo_codes", {})
+        key = code.strip().upper()
+        if not key or key in promos:
+            return False
+        promos[key] = {
+            "amount": amount,
+            "max_uses": max_uses,
+            "uses": 0,
+            "redeemed_by": [],
+        }
+        data["_promo_codes"] = promos
+        _save_data(data)
+        return True
+
+
+async def redeem_promo_code(user_id: int, code: str) -> tuple[str, int]:
+    """Redeem a promo code once per user. Returns (status, amount)."""
+    async with _data_lock:
+        data = _load_data()
+        promos = data.get("_promo_codes", {})
+        key = code.strip().upper()
+        promo = promos.get(key)
+
+        if not isinstance(promo, dict):
+            return "invalid", 0
+
+        redeemed_by = promo.setdefault("redeemed_by", [])
+        user_key = str(user_id)
+
+        if user_key in redeemed_by:
+            return "already_redeemed", 0
+
+        max_uses = promo.get("max_uses")
+        uses = int(promo.get("uses", 0))
+        if max_uses is not None and uses >= int(max_uses):
+            return "used_up", 0
+
+        amount = int(promo.get("amount", 0))
+        if amount <= 0:
+            return "invalid", 0
+
+        # Add the gems and mark the code as redeemed atomically.
+        current = data.get(user_key, STARTING_BALANCE)
+        data[user_key] = max(0, current + amount)
+        promo["uses"] = uses + 1
+        redeemed_by.append(user_key)
+        promos[key] = promo
+        data["_promo_codes"] = promos
+        _save_data(data)
+        return "success", amount
+
+
+@bot.tree.command(name="addpromo", description="[Admin only] Create a promo code that gives gems.")
+@app_commands.describe(
+    code="The promo code players will redeem",
+    amount="How many gems the code gives",
+    max_uses="Maximum total redemptions (leave empty for unlimited)"
+)
+@admin_check()
+async def addpromo(
+    interaction: discord.Interaction,
+    code: str,
+    amount: str,
+    max_uses: int | None = None
+):
+    code = code.strip().upper()
+    gem_amount = parse_amount(amount)
+
+    if not code:
+        await interaction.response.send_message("Promo code cannot be empty.", ephemeral=True)
+        return
+
+    if len(code) > 50:
+        await interaction.response.send_message("Promo code must be 50 characters or fewer.", ephemeral=True)
+        return
+
+    if gem_amount <= 0:
+        await interaction.response.send_message("Gem amount must be positive.", ephemeral=True)
+        return
+
+    if max_uses is not None and max_uses <= 0:
+        await interaction.response.send_message("Max uses must be positive.", ephemeral=True)
+        return
+
+    created = await add_promo_code(code, gem_amount, max_uses)
+    if not created:
+        await interaction.response.send_message(
+            f"The promo code **{code}** already exists.", ephemeral=True
+        )
+        return
+
+    uses_text = "unlimited" if max_uses is None else f"{max_uses:,}"
+    embed = discord.Embed(
+        title="🎟️ Promo Code Created",
+        description=(
+            f"**Code:** `{code}`\n"
+            f"**Reward:** 💎 **{fmt(gem_amount)}**\n"
+            f"**Max uses:** **{uses_text}**"
+        ),
+        color=discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="redeem", description="Redeem a promo code for gems.")
+@app_commands.describe(code="The promo code to redeem")
+async def redeem(interaction: discord.Interaction, code: str):
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "This command can only be used in a server.", ephemeral=True
+        )
+        return
+
+    if VERIFIED_ROLE_ID == 0:
+        await interaction.response.send_message(
+            "The verified role is not configured. Ask the bot owner to set VERIFIED_ROLE_ID.",
+            ephemeral=True
+        )
+        return
+
+    if not any(role.id == VERIFIED_ROLE_ID for role in interaction.user.roles):
+        await interaction.response.send_message(
+            "❌ You need the verified role to redeem promo codes.", ephemeral=True
+        )
+        return
+
+    status, amount = await redeem_promo_code(interaction.user.id, code)
+
+    messages = {
+        "invalid": "❌ That promo code is invalid.",
+        "already_redeemed": "❌ You have already redeemed this promo code.",
+        "used_up": "❌ This promo code has reached its maximum number of uses.",
+    }
+    if status != "success":
+        await interaction.response.send_message(messages.get(status, "❌ Unable to redeem that promo code."), ephemeral=True)
+        return
+
+    new_balance = await get_balance(interaction.user.id)
+    embed = discord.Embed(
+        title="🎉 Promo Code Redeemed!",
+        description=(
+            f"You received **{fmt(amount)}**.\n"
+            f"💎 **New balance:** {fmt(new_balance)}"
+        ),
+        color=discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed)
 
 
 # ----------------------------------------------------------------------------
