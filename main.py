@@ -586,15 +586,72 @@ async def crash(interaction: discord.Interaction, amount: str):
 # ----------------------------------------------------------------------------
 # MINES
 # ----------------------------------------------------------------------------
+#
+# Multiplier model (merged in from the "buffed first tile" reference):
+#   - The board here has 24 playable tiles (5x5 grid minus the Cash Out
+#     button slot, to stay within Discord's 25-component limit).
+#   - Each mine count gets its own boosted "first tile" multiplier
+#     (higher mine counts get a bigger first-click bump), then the
+#     multiplier grows along a softened fair-odds curve for each
+#     additional safe tile revealed.
+#   - The result is capped so late-game payouts don't get out of hand.
+
+MINES_TOTAL_TILES = MINES_GRID_SIZE * MINES_GRID_SIZE - 1  # 24 playable tiles
+MINES_MAX_MULTIPLIER = 12.00
+
+# Boosted first-tile multiplier per mine count (1 mine .. 23 mines, since at
+# least 1 safe tile must remain on a 24-tile board).
+MINES_FIRST_TILE = {
+    1: 1.10,
+    2: 1.14,
+    3: 1.18,
+    4: 1.22,
+    5: 1.26,
+    6: 1.30,
+    7: 1.34,
+    8: 1.38,
+    9: 1.42,
+    10: 1.48,
+    11: 1.54,
+    12: 1.60,
+    13: 1.66,
+    14: 1.72,
+    15: 1.78,
+    16: 1.84,
+    17: 1.90,
+    18: 1.96,
+    19: 2.02,
+    20: 2.08,
+    21: 2.14,
+    22: 2.20,
+    23: 2.26,
+}
 
 
-def mines_multiplier(picks: int, mines: int, total: int = MINES_GRID_SIZE * MINES_GRID_SIZE - 1) -> float:
-    if picks == 0:
+def _mines_fair_multiplier(mine_count: int, revealed_count: int) -> float:
+    """Pure hypergeometric fair-odds multiplier with no house edge or buff."""
+    safe_tiles = MINES_TOTAL_TILES - mine_count
+    revealed_count = min(revealed_count, safe_tiles)
+
+    mult = 1.0
+    for i in range(revealed_count):
+        mult *= (MINES_TOTAL_TILES - i) / (safe_tiles - i)
+    return mult
+
+
+def mines_multiplier(picks: int, mine_count: int) -> float:
+    """Buffed multiplier: mine-count-scaled first tile, softened growth curve, capped."""
+    if picks <= 0:
         return 1.0
-    multiplier = 0.6426  # payouts buffed by 19% from 0.54
-    for i in range(picks):
-        multiplier *= (total - i) / (total - mines - i)
-    return round(multiplier, 2)
+
+    safe_tiles = MINES_TOTAL_TILES - mine_count
+    picks = min(picks, safe_tiles)
+
+    fair = _mines_fair_multiplier(mine_count, picks)
+    first_fair = _mines_fair_multiplier(mine_count, 1)
+
+    multiplier = MINES_FIRST_TILE[mine_count] * ((fair / first_fair) ** 0.42)
+    return min(round(multiplier, 2), MINES_MAX_MULTIPLIER)
 
 
 class MinesButton(discord.ui.Button):
@@ -616,7 +673,7 @@ class MinesView(discord.ui.View):
         self.player_id = player_id
         self.bet = bet
         self.mine_count = mine_count
-        self.total_tiles = MINES_GRID_SIZE * MINES_GRID_SIZE - 1  # 24 tiles so Cash Out fits in Discord's 25-component limit
+        self.total_tiles = MINES_TOTAL_TILES
         self.mine_positions = set(random.sample(range(self.total_tiles), mine_count))
         self.picks = 0
         self.finished = False
@@ -631,11 +688,17 @@ class MinesView(discord.ui.View):
     def current_multiplier(self) -> float:
         return mines_multiplier(self.picks, self.mine_count)
 
+    def next_multiplier(self) -> float:
+        return mines_multiplier(self.picks + 1, self.mine_count)
+
     def build_embed(self, revealed_all: bool = False, result: str | None = None) -> discord.Embed:
         embed = discord.Embed(title="💣 Mines", color=discord.Color.blurple())
         embed.add_field(name="Bet", value=fmt(self.bet), inline=True)
         embed.add_field(name="Mines", value=str(self.mine_count), inline=True)
         embed.add_field(name="Multiplier", value=f"{self.current_multiplier():.2f}x", inline=True)
+        if not self.finished:
+            next_payout = int(self.bet * self.next_multiplier())
+            embed.add_field(name="Next tile pays", value=fmt(next_payout), inline=True)
         if result:
             embed.description = result
             embed.color = discord.Color.green() if "won" in result.lower() else discord.Color.red()
@@ -700,7 +763,7 @@ class MinesView(discord.ui.View):
 
 
 @bot.tree.command(name="mines", description="Play mines — reveal tiles and cash out before you hit a mine.")
-@app_commands.describe(amount="How many gems to bet", mines="Number of mines on the board (1-24, default 5)")
+@app_commands.describe(amount="How many gems to bet", mines="Number of mines on the board (1-23, default 5)")
 @gambling_check()
 async def mines(interaction: discord.Interaction, amount: str, mines: int = 5):
     amount = parse_amount(amount)
@@ -708,10 +771,9 @@ async def mines(interaction: discord.Interaction, amount: str, mines: int = 5):
         await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
 
-    total_tiles = MINES_GRID_SIZE * MINES_GRID_SIZE - 1
-    if not (1 <= mines <= total_tiles - 1):
+    if not (1 <= mines <= MINES_TOTAL_TILES - 1):
         await interaction.response.send_message(
-            f"Mines must be between 1 and {total_tiles - 1}.", ephemeral=True
+            f"Mines must be between 1 and {MINES_TOTAL_TILES - 1}.", ephemeral=True
         )
         return
 
