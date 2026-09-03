@@ -591,7 +591,7 @@ async def crash(interaction: discord.Interaction, amount: str):
 def mines_multiplier(picks: int, mines: int, total: int = MINES_GRID_SIZE * MINES_GRID_SIZE - 1) -> float:
     if picks == 0:
         return 1.0
-    multiplier = 0.54  # 46% house edge — payouts nerfed by 40% from 0.90
+    multiplier = 0.6426  # payouts buffed by 19% from 0.54
     for i in range(picks):
         multiplier *= (total - i) / (total - mines - i)
     return round(multiplier, 2)
