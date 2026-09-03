@@ -43,7 +43,7 @@ DATA_FILE = Path(__file__).parent / "economy.json"
 CURRENCY_NAME = "gems"
 STARTING_BALANCE = 100
 
-MINES_GRID_SIZE = 5  # 5x5 grid = 25 tiles
+MINES_GRID_SIZE = 5  # 5 columns; 24 playable tiles + 1 Cash Out button
 
 # ----------------------------------------------------------------------------
 # ECONOMY STORAGE (simple JSON-backed, async-safe with a lock)
@@ -577,7 +577,7 @@ async def crash(interaction: discord.Interaction, amount: str):
 # ----------------------------------------------------------------------------
 
 
-def mines_multiplier(picks: int, mines: int, total: int = MINES_GRID_SIZE * MINES_GRID_SIZE) -> float:
+def mines_multiplier(picks: int, mines: int, total: int = MINES_GRID_SIZE * MINES_GRID_SIZE - 1) -> float:
     if picks == 0:
         return 1.0
     multiplier = 0.97  # house edge
@@ -605,7 +605,7 @@ class MinesView(discord.ui.View):
         self.player_id = player_id
         self.bet = bet
         self.mine_count = mine_count
-        self.total_tiles = MINES_GRID_SIZE * MINES_GRID_SIZE
+        self.total_tiles = MINES_GRID_SIZE * MINES_GRID_SIZE - 1  # 24 tiles so Cash Out fits in Discord's 25-component limit
         self.mine_positions = set(random.sample(range(self.total_tiles), mine_count))
         self.picks = 0
         self.finished = False
@@ -613,7 +613,7 @@ class MinesView(discord.ui.View):
         for i in range(self.total_tiles):
             self.add_item(MinesButton(i))
 
-        cash_out_btn = discord.ui.Button(label="Cash Out", style=discord.ButtonStyle.success, row=MINES_GRID_SIZE)
+        cash_out_btn = discord.ui.Button(label="Cash Out", style=discord.ButtonStyle.success, row=MINES_GRID_SIZE - 1)
         cash_out_btn.callback = self.cash_out_callback
         self.add_item(cash_out_btn)
 
@@ -697,9 +697,11 @@ async def mines(interaction: discord.Interaction, amount: str, mines: int = 5):
         await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
 
-    total_tiles = MINES_GRID_SIZE * MINES_GRID_SIZE
+    total_tiles = MINES_GRID_SIZE * MINES_GRID_SIZE - 1
     if not (1 <= mines <= total_tiles - 1):
-        await interaction.response.send_message(f"Mines must be between 1 and {total_tiles - 1}.", ephemeral=True)
+        await interaction.response.send_message(
+            f"Mines must be between 1 and {total_tiles - 1}.", ephemeral=True
+        )
         return
 
     bal = await get_balance(interaction.user.id)
