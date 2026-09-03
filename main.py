@@ -39,7 +39,15 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 COMMAND_ROLE_ID = 1545072135297572885
 FULL_ACCESS_ROLE_IDS = {1544778851748417577, 1545039825080684554}
 
-DATA_FILE = Path(__file__).parent / "economy.json"
+# DATA_DIR should point at a mounted persistent Volume in production (e.g. on
+# Railway: Settings -> Volumes -> mount path, then set DATA_DIR to that same
+# path as an env var, e.g. DATA_DIR=/data). Without a real Volume, anything
+# written here gets wiped on every redeploy/restart — the bot has no way to
+# detect or prevent that from inside the code itself.
+DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DATA_FILE = DATA_DIR / "economy.json"
 CURRENCY_NAME = "gems"
 STARTING_BALANCE = 100
 
@@ -204,6 +212,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    print(f"Economy data directory: {DATA_DIR.resolve()}")
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s).")
