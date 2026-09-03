@@ -43,6 +43,11 @@ DATA_FILE = Path(__file__).parent / "economy.json"
 CURRENCY_NAME = "gems"
 STARTING_BALANCE = 100
 
+# Every user's balance is stored separately in economy.json using their
+# Discord user ID as the key.
+if not DATA_FILE.exists():
+    DATA_FILE.write_text("{}", encoding="utf-8")
+
 MINES_GRID_SIZE = 5  # 5 columns; 24 playable tiles + 1 Cash Out button
 
 # ----------------------------------------------------------------------------
@@ -56,15 +61,21 @@ def _load_data() -> dict:
     if not DATA_FILE.exists():
         return {}
     try:
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, FileNotFoundError):
         return {}
 
 
 def _save_data(data: dict) -> None:
-    with open(DATA_FILE, "w") as f:
+    """Save each user's data safely, keyed by their Discord user ID."""
+    temp_file = DATA_FILE.with_suffix(".tmp")
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_file, DATA_FILE)
 
 
 async def get_balance(user_id: int) -> int:
