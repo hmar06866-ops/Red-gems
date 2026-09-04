@@ -393,14 +393,9 @@ async def redeem(interaction: discord.Interaction, code: str):
         )
         return
 
-    if VERIFIED_ROLE_ID == 0:
-        await interaction.response.send_message(
-            "The verified role is not configured. Ask the bot owner to set VERIFIED_ROLE_ID.",
-            ephemeral=True
-        )
-        return
-
-    if not any(role.id == VERIFIED_ROLE_ID for role in interaction.user.roles):
+    # Only members with the required role can redeem promo codes.
+    # This uses the same role ID as the gambling commands.
+    if not any(role.id == COMMAND_ROLE_ID for role in interaction.user.roles):
         await interaction.response.send_message(
             "❌ You need the verified role to redeem promo codes.", ephemeral=True
         )
@@ -1092,8 +1087,8 @@ class MinesView(discord.ui.View):
 @gambling_check()
 async def mines(interaction: discord.Interaction, amount: str, mines: int = 5):
     amount = parse_amount(amount)
-    if amount < 1_000_000:
-        await interaction.response.send_message("❌ Minimum bet is **1,000,000 gems (1M)**.", ephemeral=True)
+    if amount <= 0:
+        await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
 
     if not (1 <= mines <= MINES_TOTAL_TILES - 1):
