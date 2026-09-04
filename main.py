@@ -614,12 +614,30 @@ class BlackjackView(discord.ui.View):
         self.dealer_hand = dealer_hand
         self.bet = bet
         self.finished = False
+        self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.player_id:
             await interaction.response.send_message("This isn't your game.", ephemeral=True)
             return False
         return True
+
+    async def on_timeout(self):
+        # Auto-stand rather than leaving the hand hanging with no resolution.
+        if self.finished:
+            return
+        while hand_value(self.dealer_hand) < 17:
+            self.dealer_hand.append(self.deck.pop())
+
+        player_total = hand_value(self.player_hand)
+        dealer_total = hand_value(self.dealer_hand)
+
+        if dealer_total > 21 or player_total > dealer_total:
+            await self.end_game(None, "win", self.bet)
+        elif dealer_total > player_total:
+            await self.end_game(None, "lose", -self.bet)
+        else:
+            await self.end_game(None, "push", 0)
 
     def build_embed(self, reveal_dealer: bool = False) -> discord.Embed:
         embed = discord.Embed(title="🃏 Blackjack", color=discord.Color.blurple())
@@ -643,7 +661,7 @@ class BlackjackView(discord.ui.View):
         embed.set_footer(text=f"Bet: {fmt(self.bet)}")
         return embed
 
-    async def end_game(self, interaction: discord.Interaction, result: str, payout: int):
+    async def end_game(self, interaction: discord.Interaction | None, result: str, payout: int):
         self.finished = True
         for child in self.children:
             child.disabled = True
@@ -657,7 +675,14 @@ class BlackjackView(discord.ui.View):
         if tax:
             result_text += f" (won {fmt(net_payout)} after {int(TAX_RATE * 100)}% tax of {fmt(tax)})"
         embed.add_field(name="Result", value=result_text, inline=False)
-        await interaction.response.edit_message(embed=embed, view=self)
+
+        if interaction is not None and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=self)
+        elif self.message is not None:
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -727,6 +752,7 @@ async def blackjack(interaction: discord.Interaction, amount: str):
         return
 
     await interaction.response.send_message(embed=view.build_embed(), view=view)
+    view.message = await interaction.original_response()
 
 
 # ----------------------------------------------------------------------------
@@ -891,35 +917,12 @@ async def crash(interaction: discord.Interaction, amount: str):
 #   - The result is capped so late-game payouts don't get out of hand.
 
 MINES_TOTAL_TILES = MINES_GRID_SIZE * MINES_GRID_SIZE - 1  # 24 playable tiles
-MINES_MAX_MULTIPLIER = 12.00
+MINES_MAX_MULTIPLIER = 8.00  # lowered from 12.00 — hard cap on late-game payouts
 
-# Boosted first-tile multiplier per mine count (1 mine .. 23 mines, since at
-# least 1 safe tile must remain on a 24-tile board).
-MINES_FIRST_TILE = {
-    1: 1.10,
-    2: 1.14,
-    3: 1.18,
-    4: 1.22,
-    5: 1.26,
-    6: 1.30,
-    7: 1.34,
-    8: 1.38,
-    9: 1.42,
-    10: 1.48,
-    11: 1.54,
-    12: 1.60,
-    13: 1.66,
-    14: 1.72,
-    15: 1.78,
-    16: 1.84,
-    17: 1.90,
-    18: 1.96,
-    19: 2.02,
-    20: 2.08,
-    21: 2.14,
-    22: 2.20,
-    23: 2.26,
-}
+# House edge baked directly into the curve (on top of the normal withdrawal
+# tax), so the "buffed first tile" boost from the old version is gone.
+# Multiplier is now pure hypergeometric fair-odds * (1 - edge), capped.
+MINES_HOUSE_EDGE = 0.04  # 4%
 
 
 def _mines_fair_multiplier(mine_count: int, revealed_count: int) -> float:
@@ -934,7 +937,7 @@ def _mines_fair_multiplier(mine_count: int, revealed_count: int) -> float:
 
 
 def mines_multiplier(picks: int, mine_count: int) -> float:
-    """Buffed multiplier: mine-count-scaled first tile, softened growth curve, capped."""
+    """Fair-odds multiplier minus a flat house edge, capped."""
     if picks <= 0:
         return 1.0
 
@@ -942,9 +945,7 @@ def mines_multiplier(picks: int, mine_count: int) -> float:
     picks = min(picks, safe_tiles)
 
     fair = _mines_fair_multiplier(mine_count, picks)
-    first_fair = _mines_fair_multiplier(mine_count, 1)
-
-    multiplier = MINES_FIRST_TILE[mine_count] * ((fair / first_fair) ** 0.42)
+    multiplier = fair * (1 - MINES_HOUSE_EDGE)
     return min(round(multiplier, 2), MINES_MAX_MULTIPLIER)
 
 
@@ -971,6 +972,7 @@ class MinesView(discord.ui.View):
         self.mine_positions = set(random.sample(range(self.total_tiles), mine_count))
         self.picks = 0
         self.finished = False
+        self.message: discord.Message | None = None
 
         for i in range(self.total_tiles):
             self.add_item(MinesButton(i))
@@ -998,7 +1000,7 @@ class MinesView(discord.ui.View):
             embed.color = discord.Color.green() if "won" in result.lower() else discord.Color.red()
         return embed
 
-    async def end_game(self, interaction: discord.Interaction, won: bool):
+    async def end_game(self, interaction: discord.Interaction | None, won: bool, timed_out: bool = False):
         self.finished = True
         for child in self.children:
             if isinstance(child, MinesButton):
@@ -1016,18 +1018,42 @@ class MinesView(discord.ui.View):
         if won:
             gross_profit = int(self.bet * self.current_multiplier()) - self.bet
             net_profit, tax = apply_tax(gross_profit)
-            new_balance = await add_balance(self.player_id, net_profit)
+            # The original bet was deducted when the game started.
+            # Return the stake plus the net winnings on a successful cash-out.
+            payout = self.bet + net_profit
+            new_balance = await add_balance(self.player_id, payout)
+            prefix = "⏱️ Timed out — auto cashed out" if timed_out else "✅ Cashed out"
             result = (
-                f"✅ Cashed out at **{self.current_multiplier():.2f}x**! "
+                f"{prefix} at **{self.current_multiplier():.2f}x**! "
                 f"Won **{fmt(net_profit)}** (after {int(TAX_RATE * 100)}% tax of {fmt(tax)}). "
                 f"New balance: {fmt(new_balance)}"
             )
+        elif timed_out:
+            # No tiles revealed before timing out — nothing was risked yet,
+            # so give the bet back instead of silently keeping it.
+            new_balance = await add_balance(self.player_id, self.bet)
+            result = f"⏱️ Game timed out with no picks made. Bet refunded. New balance: {fmt(new_balance)}"
         else:
             new_balance = await get_balance(self.player_id)
             result = f"💥 You hit a mine! Lost **{fmt(self.bet)}**. New balance: {fmt(new_balance)}"
 
-        await interaction.response.edit_message(embed=self.build_embed(result=result), view=self)
+        embed = self.build_embed(result=result)
+        if interaction is not None and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=self)
+        elif self.message is not None:
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass
         self.stop()
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        # picks > 0 means they'd already earned a multiplier — auto cash out
+        # at that multiplier rather than letting the money vanish. picks == 0
+        # means nothing was risked, so it's a straight refund.
+        await self.end_game(None, won=self.picks > 0, timed_out=True)
 
     async def reveal_tile(self, interaction: discord.Interaction, button: MinesButton):
         if self.finished:
@@ -1087,6 +1113,7 @@ async def mines(interaction: discord.Interaction, amount: str, mines: int = 5):
 
     view = MinesView(interaction.user.id, amount, mines)
     await interaction.response.send_message(embed=view.build_embed(), view=view)
+    view.message = await interaction.original_response()
 
 
 # ----------------------------------------------------------------------------
