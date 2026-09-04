@@ -1092,8 +1092,8 @@ class MinesView(discord.ui.View):
 @gambling_check()
 async def mines(interaction: discord.Interaction, amount: str, mines: int = 5):
     amount = parse_amount(amount)
-    if amount <= 0:
-        await interaction.response.send_message("Bet must be positive.", ephemeral=True)
+    if amount < 1_000_000:
+        await interaction.response.send_message("❌ Minimum bet is **1,000,000 gems (1M)**.", ephemeral=True)
         return
 
     if not (1 <= mines <= MINES_TOTAL_TILES - 1):
