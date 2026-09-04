@@ -432,11 +432,18 @@ def hand_value(hand: list[str]) -> int:
 class BlackjackView(discord.ui.View):
     def __init__(self, player_id: int, deck: list[str], player_hand: list[str], dealer_hand: list[str], bet: int):
         super().__init__(timeout=60)
-        self.player_id, self.deck, self.player_hand, self.dealer_hand, self.bet = player_id, deck, player_hand, dealer_hand, bet
+        self.player_id = player_id
+        self.deck = deck
+        self.player_hand = player_hand
+        self.dealer_hand = dealer_hand
+        self.bet = bet
         self.finished = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.player_id
+        if interaction.user.id != self.player_id:
+            await interaction.response.send_message("This is not your game.", ephemeral=True)
+            return False
+        return True
 
     def build_embed(self, reveal: bool = False) -> discord.Embed:
         embed = discord.Embed(title="🃏 Blackjack", color=discord.Color.blurple())
@@ -446,18 +453,66 @@ class BlackjackView(discord.ui.View):
         embed.set_footer(text=f"Bet: {fmt(self.bet)}")
         return embed
 
-    async def end_game(self, interaction: discord.Interaction | None, result: str, payout: int):
+    @discord.ui.button(label="Hit 🃏", style=discord.ButtonStyle.primary)
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            return
+
+        self.player_hand.append(self.deck.pop())
+        p_val = hand_value(self.player_hand)
+
+        if p_val > 21:
+            await self.end_game(interaction, "Bust! You lost", profit=0, total_return=0)
+        elif p_val == 21:
+            await self.dealer_turn(interaction)
+        else:
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Stand 🛑", style=discord.ButtonStyle.secondary)
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            return
+        await self.dealer_turn(interaction)
+
+    async def dealer_turn(self, interaction: discord.Interaction):
+        while hand_value(self.dealer_hand) < 17:
+            self.dealer_hand.append(self.deck.pop())
+
+        p_val = hand_value(self.player_hand)
+        d_val = hand_value(self.dealer_hand)
+
+        if d_val > 21:
+            await self.end_game(interaction, "Dealer busted! You win", profit=self.bet, total_return=self.bet * 2)
+        elif p_val > d_val:
+            await self.end_game(interaction, "You win!", profit=self.bet, total_return=self.bet * 2)
+        elif p_val == d_val:
+            await self.end_game(interaction, "Push (Tie)", profit=0, total_return=self.bet)
+        else:
+            await self.end_game(interaction, "Dealer wins! You lost", profit=0, total_return=0)
+
+    async def end_game(self, interaction: discord.Interaction, result: str, profit: int, total_return: int):
         self.finished = True
         for child in self.children:
             child.disabled = True
-        net_payout, tax = apply_tax(payout)
-        new_bal = await add_balance(self.player_id, net_payout)
+
+        net_profit, tax = apply_tax(profit)
+        final_payout = total_return - tax if profit > 0 else total_return
+
+        if final_payout > 0:
+            await add_balance(self.player_id, final_payout)
+
+        new_bal = await get_balance(self.player_id)
         embed = self.build_embed(reveal=True)
-        text = f"{result.upper()} — New balance: {fmt(new_bal)}"
-        if tax:
-            text += f" (Won {fmt(net_payout)} after {int(TAX_RATE * 100)}% tax of {fmt(tax)})"
+
+        if profit > 0:
+            text = f"{result.upper()} — Won **{fmt(net_profit)}** (after {int(TAX_RATE * 100)}% tax of {fmt(tax)}).\nBalance: {fmt(new_bal)}"
+        elif total_return == self.bet:
+            text = f"{result.upper()} — Bet refunded.\nBalance: {fmt(new_bal)}"
+        else:
+            text = f"{result.upper()} — Lost **{fmt(self.bet)}**.\nBalance: {fmt(new_bal)}"
+
         embed.add_field(name="Result", value=text, inline=False)
-        if interaction and not interaction.response.is_done():
+        if not interaction.response.is_done():
             await interaction.response.edit_message(embed=embed, view=self)
 
 
@@ -466,6 +521,7 @@ class BlackjackView(discord.ui.View):
 async def blackjack(interaction: discord.Interaction, amount: str):
     amt = parse_amount(amount)
     if amt <= 0:
+        await interaction.response.send_message("Bet must be positive.", ephemeral=True)
         return
     bal = await get_balance(interaction.user.id)
     if bal < amt:
@@ -473,6 +529,7 @@ async def blackjack(interaction: discord.Interaction, amount: str):
         return
 
     await add_wager_stat(interaction.user.id, amt)
+    await add_balance(interaction.user.id, -amt)
 
     deck = new_deck()
     player_hand = [deck.pop(), deck.pop()]
@@ -480,11 +537,11 @@ async def blackjack(interaction: discord.Interaction, amount: str):
     view = BlackjackView(interaction.user.id, deck, player_hand, dealer_hand, amt)
 
     if hand_value(player_hand) == 21:
-        gross = int(amt * 1.5)
-        net, tax = apply_tax(gross)
-        new_bal = await add_balance(interaction.user.id, net)
+        gross_profit = int(amt * 1.5)
+        net_profit, tax = apply_tax(gross_profit)
+        new_bal = await add_balance(interaction.user.id, amt + net_profit)
         embed = view.build_embed(reveal=True)
-        embed.add_field(name="Result", value=f"BLACKJACK! Won {fmt(net)} (after {int(TAX_RATE * 100)}% tax). Balance: {fmt(new_bal)}")
+        embed.add_field(name="Result", value=f"BLACKJACK! Won **{fmt(net_profit)}** (after {int(TAX_RATE * 100)}% tax of {fmt(tax)}).\nBalance: {fmt(new_bal)}", inline=False)
         await interaction.response.send_message(embed=embed)
         return
 
