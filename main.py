@@ -85,27 +85,58 @@ def _save_data(data: dict) -> None:
         os.replace(backup_temp, BACKUP_FILE)
 
 
+def _get_user_entry(data: dict, user_id: int | str) -> dict:
+    val = data.get(str(user_id))
+    if isinstance(val, dict):
+        return {"balance": val.get("balance", STARTING_BALANCE), "wagered": val.get("wagered", 0)}
+    if isinstance(val, int):
+        return {"balance": val, "wagered": 0}
+    return {"balance": STARTING_BALANCE, "wagered": 0}
+
+
 async def get_balance(user_id: int) -> int:
     async with _data_lock:
         data = _load_data()
-        return data.get(str(user_id), STARTING_BALANCE)
+        entry = _get_user_entry(data, user_id)
+        return entry["balance"]
 
 
 async def set_balance(user_id: int, amount: int) -> None:
     async with _data_lock:
         data = _load_data()
-        data[str(user_id)] = max(0, amount)
+        entry = _get_user_entry(data, user_id)
+        entry["balance"] = max(0, amount)
+        data[str(user_id)] = entry
         _save_data(data)
 
 
 async def add_balance(user_id: int, amount: int) -> int:
     async with _data_lock:
         data = _load_data()
-        current = data.get(str(user_id), STARTING_BALANCE)
-        new_balance = max(0, current + amount)
-        data[str(user_id)] = new_balance
+        entry = _get_user_entry(data, user_id)
+        new_balance = max(0, entry["balance"] + amount)
+        entry["balance"] = new_balance
+        data[str(user_id)] = entry
         _save_data(data)
         return new_balance
+
+
+async def add_wager_stat(user_id: int, amount: int) -> int:
+    async with _data_lock:
+        data = _load_data()
+        entry = _get_user_entry(data, user_id)
+        new_wagered = entry["wagered"] + max(0, amount)
+        entry["wagered"] = new_wagered
+        data[str(user_id)] = entry
+        _save_data(data)
+        return new_wagered
+
+
+async def get_wager_stat(user_id: int) -> int:
+    async with _data_lock:
+        data = _load_data()
+        entry = _get_user_entry(data, user_id)
+        return entry["wagered"]
 
 
 # ----------------------------------------------------------------------------
@@ -236,8 +267,9 @@ async def redeem_promo_code(user_id: int, code: str) -> tuple[str, int]:
         if amount <= 0:
             return "invalid", 0
 
-        current = data.get(user_key, STARTING_BALANCE)
-        data[user_key] = max(0, current + amount)
+        entry = _get_user_entry(data, user_key)
+        entry["balance"] = max(0, entry["balance"] + amount)
+        data[user_key] = entry
         promo["uses"] = uses + 1
         redeemed_by.append(user_key)
         promos[key] = promo
@@ -292,12 +324,17 @@ async def redeem(interaction: discord.Interaction, code: str):
 # ECONOMY COMMANDS
 # ----------------------------------------------------------------------------
 
-@bot.tree.command(name="balance", description="Check gem balance.")
+@bot.tree.command(name="balance", description="Check gem balance and wager statistics.")
 @gambling_check()
 async def balance(interaction: discord.Interaction, user: discord.User | None = None):
     target = user or interaction.user
     bal = await get_balance(target.id)
-    embed = discord.Embed(title=f"{target.display_name}'s Balance", description=f"💎 **{fmt(bal)}**", color=discord.Color.blurple())
+    wagered = await get_wager_stat(target.id)
+    embed = discord.Embed(
+        title=f"{target.display_name}'s Profile",
+        description=f"💎 **Balance:** {fmt(bal)}\n🎰 **Total Wagered:** {fmt(wagered)}",
+        color=discord.Color.blurple(),
+    )
     await interaction.response.send_message(embed=embed)
 
 
@@ -354,6 +391,8 @@ async def coinflip(interaction: discord.Interaction, amount: str, choice: app_co
     if bal < amt:
         await interaction.response.send_message("Insufficient gems.", ephemeral=True)
         return
+
+    await add_wager_stat(interaction.user.id, amt)
 
     res = random.choice(["heads", "tails"])
     if res == choice.value:
@@ -433,6 +472,8 @@ async def blackjack(interaction: discord.Interaction, amount: str):
         await interaction.response.send_message("Insufficient gems.", ephemeral=True)
         return
 
+    await add_wager_stat(interaction.user.id, amt)
+
     deck = new_deck()
     player_hand = [deck.pop(), deck.pop()]
     dealer_hand = [deck.pop(), deck.pop()]
@@ -508,6 +549,7 @@ async def crash(interaction: discord.Interaction, amount: str):
         await interaction.response.send_message("Insufficient gems.", ephemeral=True)
         return
 
+    await add_wager_stat(interaction.user.id, amt)
     await add_balance(interaction.user.id, -amt)
     crash_point = round(max(1.01, min((0.99 / (1 - random.random())) ** 0.5, CRASH_MAX_MULTIPLIER)), 2)
 
@@ -712,6 +754,7 @@ async def mines(interaction: discord.Interaction, amount: str, mines: int):
         await interaction.response.send_message(f"You don't have enough {CURRENCY_NAME}. Balance: {fmt(bal)}", ephemeral=True)
         return
 
+    await add_wager_stat(interaction.user.id, amt)
     await add_balance(interaction.user.id, -amt)
     view = MinesView(interaction.user.id, amt, mines)
     await interaction.response.send_message(embed=view.build_embed(), view=view)
